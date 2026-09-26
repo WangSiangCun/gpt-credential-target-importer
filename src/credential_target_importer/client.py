@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from urllib.parse import urljoin
 
 from .models import CredentialBundle, TargetStatus
+from .formats import build_cpa_auth_file
 
 
 class TargetImportError(RuntimeError):
@@ -63,6 +65,44 @@ class CpaTargetClient:
         payload["target"] = target
         response = self.http.request("POST", urljoin(self.base_url + "/", "api/accounts/import"),
                                      headers=self._headers(), json_body=payload)
+        if response.status_code not in (200, 201, 204):
+            raise TargetImportError("import_failed", f"CPA 导入 HTTP {response.status_code}", uncertain=True)
+        return self._json(response)
+
+
+class Sub2ApiTargetClient:
+    """Sub2API credential delivery adapter with an injected HTTP session."""
+
+    def __init__(self, base_url: str, http, api_token: str = ""):
+        self.base_url = base_url.strip().rstrip("/")
+        self.http = http
+        self.api_token = api_token.strip()
+        if not self.base_url:
+            raise TargetImportError("config", "请先配置 Sub2API 地址")
+
+    def import_account(self, credentials: CredentialBundle, target: str = "") -> dict:
+        payload = {**credentials.as_dict(), "target": target}
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if self.api_token:
+            headers["Authorization"] = "Bearer " + self.api_token
+            headers["x-api-key"] = self.api_token
+        response = self.http.request("POST", urljoin(self.base_url + "/", "api/accounts/import"),
+                                     headers=headers, json_body=payload)
+        if response.status_code not in (200, 201, 204):
+            raise TargetImportError("import_failed", f"Sub2API 导入 HTTP {response.status_code}", uncertain=True)
+        return CpaTargetClient._json(response)
+
+    def import_auth_file(self, credentials: CredentialBundle, plan_type: str = "team") -> dict:
+        """Upload a CPA-compatible auth file through the management API."""
+        payload = build_cpa_auth_file(credentials, plan_type)
+        filename = credentials.email.replace("@", "_") + ".json"
+        response = self.http.request(
+            "POST", urljoin(self.base_url + "/", "v0/management/auth-files"),
+            headers={"Accept": "application/json",
+                     "Authorization": "Bearer " + self.api_token,
+                     "X-Management-Key": self.api_token},
+            files={"file": (filename, json.dumps(payload, ensure_ascii=False).encode(), "application/json")},
+        )
         if response.status_code not in (200, 201, 204):
             raise TargetImportError("import_failed", f"CPA 导入 HTTP {response.status_code}", uncertain=True)
         return self._json(response)
